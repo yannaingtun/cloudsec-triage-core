@@ -5,12 +5,12 @@ more for a real file, so the work runs in a background thread and the browser
 polls. A request that blocks that long dies to proxy timeouts and says nothing
 useful while it waits.
 
-Jobs live in memory and are lost on restart. That is deliberate: the durable
-record belongs to the collector, and a second store here would let the two
-disagree about what happened.
+Jobs live in memory and are lost on restart. Finished runs are kept in a
+SQLite store: written directly with --db (no separate process), or posted to
+a standalone collector with --collector. Use one or the other, not both.
 
     CLOUDSEC_TRIAGE_URL=http://127.0.0.1:8100 \
-    CLOUDSEC_COLLECTOR=http://127.0.0.1:8110 \
+    CLOUDSEC_DB=runs.db \
     python -m cloudsec.web.app
 """
 
@@ -30,6 +30,8 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from cloudsec import client as triage_client
 from cloudsec import runs as runs_mod
+from cloudsec.collector import store as run_store
+import datetime
 
 HERE = Path(__file__).parent
 MAX_BYTES = 2_000_000          # an IaC file is kilobytes; this is a guard, not a limit
@@ -79,12 +81,20 @@ def _work(job_id: str, path: Path, profile: str | None) -> None:
         seconds = round(time.time() - started, 1)
 
         run_id = None
+        db = _db()
         collector = cfg("CLOUDSEC_COLLECTOR")
-        if collector:
+        if db is not None or collector:
             _set(job_id, stage="filing")
             run = runs_mod.build_run([result], profile=profile, service=health,
                                      seconds=seconds, source="upload")
-            run_id = runs_mod.post_run(collector, run)
+            if db is not None:
+                run.setdefault("run_id", uuid.uuid4().hex)
+                run.setdefault("created_at", datetime.datetime.now(
+                    datetime.timezone.utc).isoformat(timespec="seconds"))
+                with _DB_LOCK:
+                    run_id = run_store.save(db, run)
+            else:
+                run_id = runs_mod.post_run(collector, run)
 
         _set(job_id, stage="done", seconds=seconds, run_id=run_id,
              result={
@@ -110,6 +120,22 @@ def _work(job_id: str, path: Path, profile: str | None) -> None:
             pass
 
 
+_DB = None
+_DB_LOCK = threading.Lock()
+
+
+def _db():
+    """Local run store (CLOUDSEC_DB). None means: use the collector URL, if any."""
+    global _DB
+    path = cfg("CLOUDSEC_DB")
+    if not path:
+        return None
+    with _DB_LOCK:
+        if _DB is None:
+            _DB = run_store.connect(path)
+    return _DB
+
+
 app = FastAPI(title="cloudsec-dashboard")
 
 
@@ -129,7 +155,7 @@ def config():
     """What this dashboard is pointed at, so the page can show provenance."""
     out = {"profile": cfg("CLOUDSEC_PROFILE"),
            "triage_url": cfg("CLOUDSEC_TRIAGE_URL", "http://127.0.0.1:8100"),
-           "collector": cfg("CLOUDSEC_COLLECTOR"), "service": None}
+           "collector": cfg("CLOUDSEC_COLLECTOR"), "db": cfg("CLOUDSEC_DB"), "service": None}
     try:
         out["service"] = triage_client.TriageClient(out["triage_url"]).health()
     except Exception as e:
@@ -180,7 +206,11 @@ def service():
 
 @app.get("/api/runs")
 def history(limit: int = 20):
-    """Proxy the collector, so the page talks to one origin."""
+    """Run history: local store if configured, otherwise proxy the collector."""
+    db = _db()
+    if db is not None:
+        with _DB_LOCK:
+            return {"runs": run_store.list_runs(db, limit=limit)}
     url = cfg("CLOUDSEC_COLLECTOR")
     if not url:
         return {"runs": [], "note": "no collector configured"}
@@ -195,6 +225,13 @@ def history(limit: int = 20):
 @app.get("/api/runs/{run_id}")
 def one_run(run_id: str):
     """One stored run, for the history drill-down."""
+    db = _db()
+    if db is not None:
+        with _DB_LOCK:
+            run = run_store.get_run(db, run_id)
+        if run is None:
+            raise HTTPException(404, "run not found")
+        return run
     url = cfg("CLOUDSEC_COLLECTOR")
     if not url:
         raise HTTPException(404, "no collector configured")
@@ -216,7 +253,8 @@ def main():
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--profile")
     p.add_argument("--triage-url")
-    p.add_argument("--collector")
+    p.add_argument("--collector", help="standalone collector URL (optional)")
+    p.add_argument("--db", help="local SQLite run store, e.g. runs.db")
     a = p.parse_args()
     if a.profile:
         os.environ["CLOUDSEC_PROFILE"] = a.profile
@@ -224,6 +262,8 @@ def main():
         os.environ["CLOUDSEC_TRIAGE_URL"] = a.triage_url
     if a.collector:
         os.environ["CLOUDSEC_COLLECTOR"] = a.collector
+    if a.db:
+        os.environ["CLOUDSEC_DB"] = a.db
     uvicorn.run(app, host=a.host, port=a.port, workers=1)
 
 

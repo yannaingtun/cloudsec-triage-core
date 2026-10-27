@@ -1,0 +1,27 @@
+[project]
+name = "cloudsec"
+version = "0.1.0"
+description = "Scan, triage and report insecure IaC configurations"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.5"]
+web = ["fastapi==0.118.0", "uvicorn==0.37.0", "python-multipart==0.0.20"]
+# torch is deliberately absent: it is platform-specific, and on ARM64
+# it must come from NVIDIA's build rather than PyPI. Install it first.
+serve = ["fastapi==0.118.0", "uvicorn==0.37.0", "transformers>=5,<6",
+         "accelerate", "peft", "packaging"]
+
+# The collector stores runs and never loads a model, so it shares the web
+# stack and none of the serve stack.
+collector = ["fastapi==0.118.0", "uvicorn==0.37.0"]
+
+[tool.setuptools.packages.find]
+include = ["cloudsec*"]
+
+[tool.setuptools.package-data]
+"cloudsec.web" = ["index.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

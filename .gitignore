@@ -1,0 +1,22 @@
+# Python build and cache files
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Local virtual environment
+.venv/
+
+# Secrets: never commit
+.env
+tools/
+tools/
+tools/
+tools/
+cloudsec/data/trivy_id_map.json
+
+# toolchain tarballs fetched for source builds
+go*.linux-*.tar.gz
+
+# toolchain tarballs fetched for source builds
+go*.linux-*.tar.gz

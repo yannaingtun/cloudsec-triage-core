@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CloudSec Triage</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #fff; --ink: #1b1b19; --muted: #6b6b66;
+    --line: #e4e4e0; --accent: #3c6e57; --tp: #a33a2a; --fp: #4a6fa5;
+    --warn: #8a6d1f; --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16161a; --panel: #1e1e23; --ink: #e9e9e4; --muted: #9a9a93;
+      --line: #2e2e35; --accent: #7fb79b; --tp: #e08a78; --fp: #8fb0dd;
+      --warn: #d4b55e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 16px 80px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .sub code { font-size: 12px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 18px; margin-bottom: 18px;
+  }
+  /* a <label> is inline by default, which collapses the drop zone */
+  .drop {
+    display: block; border: 1.5px dashed var(--line); border-radius: var(--radius);
+    padding: 36px 18px; text-align: center; cursor: pointer; color: var(--muted);
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: rgba(60,110,87,.06); }
+  .drop strong { color: var(--ink); display: block; margin-bottom: 4px; }
+  input[type=file] { display: none; }
+  .stages { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  .stage {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .stage.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .stage.done { opacity: .55; }
+  .counts { display: flex; gap: 18px; flex-wrap: wrap; margin: 2px 0 14px; }
+  .count b { font-size: 20px; font-weight: 650; }
+  .count span { color: var(--muted); font-size: 12px; display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase;
+       letter-spacing: .05em; color: var(--muted); padding: 6px 8px;
+       border-bottom: 1px solid var(--line); font-weight: 600; }
+  td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  .chip { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px;
+          border: 1px solid currentColor; }
+  .chip.TP { color: var(--tp); } .chip.FP { color: var(--fp); }
+  .chip.none { color: var(--warn); }
+  .sev { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  .note { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .err { color: var(--tp); }
+  .hist { font-size: 13px; }
+  .hist div { display: flex; gap: 14px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .hist div:last-child { border-bottom: 0; }
+  .hist .row { cursor: pointer; }
+  .hist .row:hover { color: var(--accent); }
+  .hist .t { color: var(--muted); white-space: nowrap; }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>CloudSec Triage</h1>
+  <div class="sub" id="prov">connecting…</div>
+
+  <div class="panel">
+    <label class="drop" id="drop">
+      <strong>Drop an IaC file, or click to choose</strong>
+      Terraform, CloudFormation or Kubernetes
+      <input type="file" id="file">
+    </label>
+    <div class="stages" id="stages"></div>
+    <div class="note" id="note"></div>
+  </div>
+
+  <div class="panel hide" id="results">
+    <div id="ctx" class="note"></div>
+    <div class="counts" id="counts"></div>
+    <table><thead><tr>
+      <th>Verdict</th><th>Conf</th><th>Severity</th><th>Tool</th><th>Check</th><th>Lines</th><th>Detail</th>
+    </tr></thead><tbody id="rows"></tbody></table>
+  </div>
+
+  <div class="panel">
+    <th style="border:0;padding:0 0 8px">Recent runs</th>
+    <div class="hist" id="hist">loading…</div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const STAGES = ["queued", "scanning", "triaging", "filing", "done"];
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function config() {
+  try {
+    const c = await (await fetch("/api/config")).json();
+    const s = c.service;
+    $("#prov").innerHTML = s
+      ? `profile <code>${esc(c.profile || "default")}</code> · model
+         <code>${esc((s.model || "").split("/").pop())}</code>
+         <code>${esc(s.fingerprint)}</code> on ${esc(s.device)}
+         ${c.collector ? "· filing runs" : "· not filing runs"}`
+      : `<span class="err">triage service unreachable: ${esc(c.error || "")}</span>`;
+  } catch (e) { $("#prov").textContent = "config failed: " + e; }
+}
+
+function drawStages(now) {
+  const i = STAGES.indexOf(now);
+  $("#stages").innerHTML = STAGES.map((s, n) =>
+    `<span class="stage ${n === i ? "on" : n < i ? "done" : ""}">${s}</span>`).join("");
+}
+
+// The model's severity when it gave one, else the scanner's. Checkov reports
+// UNKNOWN without a platform key, so the model's is usually the only signal.
+const sev = i => i.verdict_severity || (i.severity === "UNKNOWN" ? "" : i.severity) || "";
+
+function paint(r, seconds) {
+  $("#results").classList.remove("hide");
+  $("#ctx").textContent = r.context
+    ? `${r.context.iac_type} / ${r.context.cloud_provider} / ${r.context.environment} — ${r.context.purpose}`
+    : "no file context returned";
+  $("#counts").innerHTML = [
+    [r.items.length, "findings"], [r.tp, "true positive"],
+    [r.fp, "false positive"], [r.unaddressed, "unaddressed"],
+    [seconds + "s", "elapsed"],
+  ].map(([v, k]) => `<div class="count"><b>${esc(v)}</b><span>${k}</span></div>`).join("");
+  $("#rows").innerHTML = r.items.map(i => `<tr>
+    <td><span class="chip ${i.label || "none"}">${i.label || "—"}</span></td>
+    <td class="sev">${i.confidence == null ? "" : i.confidence.toFixed(2)}</td>
+    <td class="sev">${esc(sev(i))}</td>
+    <td>${esc(i.tool)}</td>
+    <td class="mono">${esc(i.check_id)}${i.occurrence ? " #" + i.occurrence : ""}</td>
+    <td class="mono">${i.start_line}-${i.end_line}</td>
+    <td>${esc(i.fix || i.reason || i.title || "")}</td></tr>`).join("");
+}
+
+const draw = j => paint(j.result, j.seconds);
+
+async function poll(id) {
+  for (;;) {
+    const j = await (await fetch("/api/jobs/" + id)).json();
+    drawStages(j.stage);
+    if (j.stage === "error") { $("#note").innerHTML = `<span class="err">${esc(j.error)}</span>`; return; }
+    if (j.stage === "done") {
+      $("#note").textContent = j.run_id ? "filed as " + j.run_id : "not filed";
+      draw(j); history(); return;
+    }
+    const n = j.findings;
+    $("#note").textContent = j.stage === "triaging" && n
+      ? `${n} findings, about ${Math.round(n * 2.7)}s of generation`
+      : "working…";
+    await new Promise(r => setTimeout(r, 1500));
+  }
+}
+
+async function send(f) {
+  $("#results").classList.add("hide");
+  $("#note").textContent = "uploading " + f.name;
+  drawStages("queued");
+  const fd = new FormData(); fd.append("file", f);
+  const res = await fetch("/api/scan", { method: "POST", body: fd });
+  if (!res.ok) { $("#note").innerHTML = `<span class="err">${esc(await res.text())}</span>`; return; }
+  poll((await res.json()).job_id);
+}
+
+async function history() {
+  try {
+    const { runs = [], error } = await (await fetch("/api/runs")).json();
+    $("#hist").innerHTML = error ? `<span class="err">${esc(error)}</span>`
+      : runs.length ? runs.map(r => `<div class="row" data-id="${esc(r.run_id)}">
+          <span class="t">${esc(r.created_at.replace("T", " ").slice(0, 16))}</span>
+          <span>${esc(r.source)}</span>
+          <span>${r.findings} findings, ${r.tp} TP</span>
+          <span class="t mono">${esc((r.model_fingerprint || "").slice(0, 8))}</span>
+        </div>`).join("") : "no runs yet";
+  } catch (e) { $("#hist").textContent = "history unavailable"; }
+}
+
+async function showRun(id) {
+  const run = await (await fetch("/api/runs/" + id)).json();
+  const f = (run.files || [])[0];
+  if (!f) { $("#note").textContent = "run has no files"; return; }
+  const items = f.findings || [];
+  paint({
+    context: f.iac_type ? { iac_type: f.iac_type, cloud_provider: f.cloud_provider,
+                            environment: f.environment, purpose: f.purpose } : null,
+    items,
+    tp: items.filter(i => i.label === "TP").length,
+    fp: items.filter(i => i.label === "FP").length,
+    unaddressed: items.filter(i => !i.label).length,
+  }, run.seconds);
+  $("#note").textContent =
+    `${f.path} · ${run.created_at.replace("T", " ").slice(0, 16)} · ` +
+    `${run.profile} · checkov ${run.checkov_version} · trivy ${run.trivy_version} · ` +
+    `${(run.model_fingerprint || "").slice(0, 8)}`;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+$("#hist").addEventListener("click", ev => {
+  const row = ev.target.closest(".row");
+  if (row) showRun(row.dataset.id);
+});
+
+const drop = $("#drop");
+["dragenter", "dragover"].forEach(e => drop.addEventListener(e, ev => {
+  ev.preventDefault(); drop.classList.add("over");
+}));
+["dragleave", "drop"].forEach(e => drop.addEventListener(e, () => drop.classList.remove("over")));
+drop.addEventListener("drop", ev => {
+  ev.preventDefault();
+  if (ev.dataTransfer.files[0]) send(ev.dataTransfer.files[0]);
+});
+$("#file").addEventListener("change", ev => ev.target.files[0] && send(ev.target.files[0]));
+
+config(); history();
+</script>
+</body>
+</html>

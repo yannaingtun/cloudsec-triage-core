@@ -1,0 +1,13 @@
+# Scanner versions per profile.
+# "training" = versions that produced the model's training data (to be confirmed on spark-131c).
+# Trivy downloads are verified against the official release checksums file.
+
+default = "training"
+
+[profiles.training]
+checkov = "3.2.495"
+trivy = "0.58.2"
+
+[profiles.latest]
+checkov = "3.3.16"
+trivy = "0.74.0"

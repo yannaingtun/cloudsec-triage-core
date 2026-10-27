@@ -58,6 +58,24 @@ def zone_temps() -> dict[str, int]:
     return out
 
 
+def gpu_stats() -> dict:
+    """Utilisation and memory, for a client explaining what the GPU is doing.
+
+    Empty dict when unreadable: a missing reading must not break /health.
+    """
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        h = pynvml.nvmlDeviceGetHandleByIndex(0)
+        u = pynvml.nvmlDeviceGetUtilizationRates(h)
+        m = pynvml.nvmlDeviceGetMemoryInfo(h)
+        return {"util": int(u.gpu),
+                "mem_used_gb": round(m.used / 2 ** 30, 1),
+                "mem_total_gb": round(m.total / 2 ** 30, 1)}
+    except Exception:
+        return {}
+
+
 def hottest() -> int | None:
     """The highest reading anywhere, GPU or zone. None if nothing is readable."""
     vals = [v for v in (gpu_temp(),) if v is not None]

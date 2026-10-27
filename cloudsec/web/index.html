@@ -17,6 +17,12 @@
       --warn: #d4b55e;
     }
   }
+  /* Explicit override, for a viewer whose system is light but who wants dark. */
+  :root[data-theme="dark"] {
+    --bg: #16161a; --panel: #1e1e23; --ink: #e9e9e4; --muted: #9a9a93;
+    --line: #2e2e35; --accent: #7fb79b; --tp: #e08a78; --fp: #8fb0dd;
+    --warn: #d4b55e;
+  }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
@@ -24,6 +30,14 @@
   }
   .wrap { max-width: 980px; margin: 0 auto; padding: 32px 16px 80px; }
   h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .head { display: flex; align-items: baseline; justify-content: space-between;
+          gap: 16px; }
+  .ghost {
+    font: inherit; font-size: 12px; color: var(--muted); background: none;
+    border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px;
+    cursor: pointer;
+  }
+  .ghost:hover { color: var(--ink); border-color: var(--accent); }
   .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
   .sub code { font-size: 12px; }
   .panel {
@@ -69,12 +83,32 @@
   .hist .row { cursor: pointer; }
   .hist .row:hover { color: var(--accent); }
   .hist .t { color: var(--muted); white-space: nowrap; }
+  /* Status strip. One meter, for temperature: it is the only value here that
+     varies and has a threshold. Utilisation is effectively one bit and memory
+     is constant once the model loads, so both are text. */
+  .svc { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+         font-size: 12px; color: var(--muted); margin-top: 14px;
+         padding-top: 14px; border-top: 1px solid var(--line); }
+  .meter { position: relative; width: 150px; height: 6px; border-radius: 3px;
+           background: var(--line); overflow: hidden; }
+  .meter i { position: absolute; inset: 0 auto 0 0; display: block;
+             background: var(--accent); border-radius: 3px; width: 0;
+             transition: width .4s ease, background .4s ease; }
+  .meter.warm i { background: var(--warn); }
+  .meter.hot  i { background: var(--tp); }
+  .meter u { position: absolute; top: -3px; bottom: -3px; width: 1px;
+             background: var(--ink); opacity: .45; }
+  .spark { display: block; }
+  .svc b { color: var(--ink); font-weight: 600; }
   .hide { display: none; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>CloudSec Triage</h1>
+  <div class="head">
+    <h1>CloudSec Triage</h1>
+    <button id="themeBtn" class="ghost" title="Theme">Auto</button>
+  </div>
   <div class="sub" id="prov">connecting…</div>
 
   <div class="panel">
@@ -85,6 +119,13 @@
     </label>
     <div class="stages" id="stages"></div>
     <div class="note" id="note"></div>
+    <div class="svc" id="svc">
+      <span>GPU</span>
+      <span class="meter" id="svcbar"><i></i><u id="svcmark"></u></span>
+      <span id="svctemp">—</span>
+      <svg class="spark" id="svcspark" width="120" height="26" aria-hidden="true"></svg>
+      <span id="svcrest"></span>
+    </div>
   </div>
 
   <div class="panel hide" id="results">
@@ -162,9 +203,21 @@ async function poll(id) {
       draw(j); history(); return;
     }
     const n = j.findings;
-    $("#note").textContent = j.stage === "triaging" && n
+    let note = j.stage === "triaging" && n
       ? `${n} findings, about ${Math.round(n * 2.7)}s of generation`
       : "working…";
+    if (j.stage === "triaging") {
+      try {
+        const sv = await (await fetch("/api/service")).json();
+        if (sv.paused_now) {
+          note += ` · cooling pause at ${sv.temp}C, paused ${sv.paused_seconds}s so far`;
+        } else if (sv.temp) {
+          note += ` · GPU ${sv.temp}C` +
+                  (sv.paused_seconds ? `, ${sv.paused_seconds}s of cooling so far` : "");
+        }
+      } catch (e) { /* the service may be mid-restart; the stage text still stands */ }
+    }
+    $("#note").textContent = note;
     await new Promise(r => setTimeout(r, 1500));
   }
 }
@@ -216,6 +269,76 @@ $("#hist").addEventListener("click", ev => {
   const row = ev.target.closest(".row");
   if (row) showRun(row.dataset.id);
 });
+
+// Theme cycles auto, dark, light. The choice is per-viewer and per-browser,
+// so localStorage is the right home for it; it can throw in a private window,
+// so every access is guarded and the page renders fine without it.
+const THEME_KEY = "cloudsec-theme";
+const LABEL = { dark: "Dark", light: "Light" };
+
+function applyTheme(t) {
+  const el = document.documentElement;
+  if (t) el.setAttribute("data-theme", t);
+  else el.removeAttribute("data-theme");
+  $("#themeBtn").textContent = LABEL[t] || "Auto";
+}
+
+try { applyTheme(localStorage.getItem(THEME_KEY)); } catch (e) { applyTheme(null); }
+
+$("#themeBtn").addEventListener("click", () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const next = cur === "dark" ? "light" : cur === "light" ? null : "dark";
+  applyTheme(next);
+  try {
+    if (next) localStorage.setItem(THEME_KEY, next);
+    else localStorage.removeItem(THEME_KEY);
+  } catch (e) { /* private window; the choice just will not persist */ }
+});
+
+// Service strip. Samples are kept client-side: the shape over the last few
+// minutes is what explains a slow job, and the server has no reason to store it.
+const TEMP_MAX = 100;
+const temps = [];
+
+function spark(vals) {
+  const w = 120, h = 26, n = vals.length;
+  if (n < 2) return "";
+  const lo = Math.min(...vals) - 1, hi = Math.max(...vals) + 1;
+  const pts = vals.map((v, i) =>
+    `${(i / (n - 1) * w).toFixed(1)},${(h - (v - lo) / (hi - lo) * h).toFixed(1)}`);
+  return `<polyline fill="none" stroke="currentColor" stroke-width="1.5"
+    stroke-linejoin="round" points="${pts.join(" ")}"/>`;
+}
+
+async function service() {
+  let sv;
+  try { sv = await (await fetch("/api/service")).json(); } catch (e) { return; }
+  if (sv.error || sv.temp == null) { $("#svc").classList.add("hide"); return; }
+  $("#svc").classList.remove("hide");
+
+  temps.push(sv.temp);
+  if (temps.length > 90) temps.shift();
+
+  const bar = $("#svcbar"), limit = sv.pause_temp || 0;
+  bar.querySelector("i").style.width = Math.min(100, sv.temp / TEMP_MAX * 100) + "%";
+  bar.classList.toggle("hot", limit > 0 && sv.temp >= limit);
+  bar.classList.toggle("warm", limit > 0 && sv.temp >= limit - 8 && sv.temp < limit);
+  $("#svcmark").style.left = limit ? (limit / TEMP_MAX * 100) + "%" : "-10px";
+
+  $("#svctemp").innerHTML = `<b>${sv.temp}°C</b>` +
+    (limit ? ` <span>pauses at ${limit}</span>` : "");
+  $("#svcspark").innerHTML = spark(temps);
+
+  const bits = [];
+  if (sv.util != null) bits.push(`${sv.util}% busy`);
+  if (sv.mem_used_gb != null) bits.push(`${sv.mem_used_gb} of ${sv.mem_total_gb} GB`);
+  if (sv.queued) bits.push(`${sv.queued} queued`);
+  if (sv.paused_now) bits.push(`<b>cooling</b>`);
+  $("#svcrest").innerHTML = bits.join(" · ");
+}
+
+service();
+setInterval(service, 4000);
 
 const drop = $("#drop");
 ["dragenter", "dragover"].forEach(e => drop.addEventListener(e, ev => {

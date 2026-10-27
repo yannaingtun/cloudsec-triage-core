@@ -118,6 +118,12 @@ def index():
     return FileResponse(HERE / "index.html")
 
 
+@app.get("/review")
+def review():
+    """The review view. Kept alongside the original page, not replacing it."""
+    return FileResponse(HERE / "review.html")
+
+
 @app.get("/api/config")
 def config():
     """What this dashboard is pointed at, so the page can show provenance."""
@@ -160,6 +166,16 @@ def job(job_id: str):
     if j is None:
         raise HTTPException(404, "no such job")
     return j
+
+
+@app.get("/api/service")
+def service():
+    """Live service state, so a long wait can say why it is long."""
+    try:
+        return triage_client.TriageClient(
+            cfg("CLOUDSEC_TRIAGE_URL", "http://127.0.0.1:8100")).health()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/api/runs")

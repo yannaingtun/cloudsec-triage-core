@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CloudSec Triage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Public Sans is the US Web Design System face: a tool handed to a
+     government agency, set in a typeface made for government services.
+     IBM Plex Mono carries code, which here is content rather than styling.
+
+     Three status colours, validated for colourblind separation against both
+     surfaces. They are never the only signal: every marker also carries a
+     shape and every row a word. */
+  :root {
+    --ink: #11161C; --paper: #F6F7F8; --panel: #FFFFFF; --rule: #DDE1E5;
+    --muted: #5C6773; --faint: #EEF1F3;
+    --confirmed: #9B2C2C; --dismissed: #1A5FB4; --review: #9A6A00;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink: #E7EAEE; --paper: #0F1319; --panel: #161B22; --rule: #262D36;
+      --muted: #8A95A3; --faint: #1B2129;
+      --confirmed: #C96E60; --dismissed: #5590D0; --review: #A8862F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #E7EAEE; --paper: #0F1319; --panel: #161B22; --rule: #262D36;
+    --muted: #8A95A3; --faint: #1B2129;
+    --confirmed: #C96E60; --dismissed: #5590D0; --review: #A8862F;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 400 15px/1.5 "Public Sans", ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 16px 72px; }
+
+  header { display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+           padding-bottom: 16px; border-bottom: 1px solid var(--rule); }
+  h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.015em; margin: 0;
+       margin-right: auto; }
+  .btn { font: inherit; font-size: 13px; color: var(--muted); background: none;
+         border: 1px solid var(--rule); border-radius: 5px; padding: 4px 11px;
+         cursor: pointer; }
+  .btn:hover { color: var(--ink); }
+  .btn:focus-visible, .lane:focus-visible, .mark:focus-visible { outline: 2px solid var(--dismissed); outline-offset: 2px; }
+
+  /* Status strip: one meter, for the only value that varies and has a limit. */
+  .svc { display: flex; align-items: center; gap: 10px; font-size: 12px;
+         color: var(--muted); font-variant-numeric: tabular-nums; }
+  .meter { position: relative; width: 110px; height: 5px; border-radius: 3px;
+           background: var(--faint); }
+  .meter i { position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+             border-radius: 3px; background: var(--muted);
+             transition: width .4s ease, background .4s ease; }
+  .meter.warm i { background: var(--review); }
+  .meter.hot i { background: var(--confirmed); }
+  .meter u { position: absolute; top: -3px; bottom: -3px; width: 1px;
+             background: var(--ink); opacity: .4; }
+
+  .drop { display: block; margin: 22px 0; padding: 30px; text-align: center;
+          border: 1.5px dashed var(--rule); border-radius: 8px;
+          color: var(--muted); cursor: pointer; background: var(--panel); }
+  .drop:hover, .drop.over { border-color: var(--dismissed); }
+  .drop b { display: block; color: var(--ink); font-weight: 500; margin-bottom: 3px; }
+  input[type=file] { display: none; }
+  .status { margin: 14px 0; font-size: 13px; color: var(--muted); min-height: 20px; }
+
+  .review { display: grid; grid-template-columns: 236px 1fr; gap: 20px;
+            margin-top: 22px; }
+  @media (max-width: 760px) { .review { grid-template-columns: 1fr; } }
+
+  .lanes { display: flex; flex-direction: column; gap: 2px; margin-bottom: 18px; }
+  .lane { display: flex; align-items: baseline; gap: 9px; width: 100%;
+          font: inherit; text-align: left; background: none; cursor: pointer;
+          border: 0; border-left: 2px solid transparent; padding: 5px 9px;
+          color: var(--muted); border-radius: 0 4px 4px 0; }
+  .lane:hover { background: var(--faint); }
+  .lane[aria-pressed="true"] { background: var(--faint); color: var(--ink); }
+  .lane .n { font-weight: 700; font-size: 17px; font-variant-numeric: tabular-nums;
+             min-width: 24px; }
+  .lane.c { border-left-color: var(--confirmed); }
+  .lane.d { border-left-color: var(--dismissed); }
+  .lane.r { border-left-color: var(--review); }
+
+  .list { list-style: none; margin: 0; padding: 0; max-height: 420px;
+          overflow-y: auto; }
+  .list li { border-bottom: 1px solid var(--rule); }
+  .list button { display: block; width: 100%; text-align: left; font: inherit;
+                 background: none; border: 0; padding: 7px 9px; cursor: pointer;
+                 color: var(--ink); border-left: 2px solid transparent; }
+  .list button:hover { background: var(--faint); }
+  .list button[aria-current="true"] { background: var(--faint); font-weight: 500; }
+  .list .id { font-family: var(--mono); font-size: 12px; display: block; }
+  .list .meta { font-size: 11px; color: var(--muted); }
+  .list.c button { border-left-color: var(--confirmed); }
+  .list.d button { border-left-color: var(--dismissed); }
+  .list.r button { border-left-color: var(--review); }
+
+  .src { background: var(--panel); border: 1px solid var(--rule);
+         border-radius: 8px; overflow: hidden; }
+  .srchead { display: flex; justify-content: space-between; gap: 12px;
+             padding: 9px 14px; border-bottom: 1px solid var(--rule);
+             font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .code { margin: 0; overflow: auto; max-height: 520px;
+          font-family: var(--mono); font-size: 12.5px; line-height: 1.65; }
+  .row { display: grid; grid-template-columns: 46px 26px 1fr; }
+  .row.on { background: var(--faint); }
+  .ln { text-align: right; padding-right: 10px; color: var(--muted);
+        opacity: .65; user-select: none; }
+  .gut { display: flex; gap: 2px; align-items: stretch; padding: 2px 4px 2px 0; }
+  .mark { width: 3px; border-radius: 2px; border: 0; padding: 0; cursor: pointer;
+          background: var(--muted); }
+  .mark.c { background: var(--confirmed); }
+  .mark.d { background: var(--dismissed); }
+  /* Needs-review is striped, not just amber: shape carries the state too. */
+  .mark.r { background: repeating-linear-gradient(
+              180deg, var(--review) 0 3px, transparent 3px 6px); }
+  .mark[aria-current="true"] { width: 5px; }
+  .txt { white-space: pre; padding-right: 14px; }
+
+  .detail { margin-top: 20px; background: var(--panel); border: 1px solid var(--rule);
+            border-left: 3px solid var(--rule); border-radius: 8px; padding: 16px 18px; }
+  .detail.c { border-left-color: var(--confirmed); }
+  .detail.d { border-left-color: var(--dismissed); }
+  .detail.r { border-left-color: var(--review); }
+  .detail h2 { margin: 0 0 4px; font-size: 15px; font-family: var(--mono);
+               font-weight: 500; }
+  .detail .meta { font-size: 12px; color: var(--muted); margin-bottom: 10px;
+                  font-variant-numeric: tabular-nums; }
+  .detail p { margin: 0; max-width: 72ch; }
+  .verdict { font-weight: 700; }
+  .verdict.c { color: var(--confirmed); }
+  .verdict.d { color: var(--dismissed); }
+  .verdict.r { color: var(--review); }
+  .caution { margin-top: 10px; font-size: 13px; color: var(--review); max-width: 72ch; }
+
+  .hist { margin-top: 36px; font-size: 13px; }
+  .hist h2 { font-size: 13px; font-weight: 700; margin: 0 0 8px; }
+  .hist div { display: flex; gap: 14px; padding: 5px 0;
+              border-bottom: 1px solid var(--rule); color: var(--muted);
+              font-variant-numeric: tabular-nums; }
+  .hide { display: none; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>CloudSec Triage</h1>
+    <div class="svc hide" id="svc">
+      <span class="meter" id="bar"><i></i><u id="mark"></u></span>
+      <span id="temp"></span><span id="rest"></span>
+    </div>
+    <button class="btn" id="theme">Auto</button>
+  </header>
+
+  <label class="drop" id="drop">
+    <b>Drop an IaC file, or click to choose</b>
+    Terraform, CloudFormation or Kubernetes
+    <input type="file" id="file">
+  </label>
+  <div class="status" id="status"></div>
+
+  <div class="review hide" id="review">
+    <aside>
+      <div class="lanes" id="lanes"></div>
+      <ul class="list" id="list"></ul>
+    </aside>
+    <div>
+      <div class="src">
+        <div class="srchead"><span id="fname"></span><span id="ctx"></span></div>
+        <div class="code" id="code"></div>
+      </div>
+      <div class="detail" id="detail"></div>
+    </div>
+  </div>
+
+  <div class="hist">
+    <h2>Recent runs</h2>
+    <div id="hist"></div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// A verdict goes to "needs review" when the model's confidence sits in the
+// band we measured at 54% accurate, whichever way it leaned. That band is 10%
+// of findings and about 38% of the errors, so it is the one worth a human.
+const LOW = 0.1, HIGH = 0.9;
+const LANES = { c: "confirmed", d: "dismissed", r: "needs review" };
+
+let FINDINGS = [], SRC = [], SEL = -1, FILTER = null;
+
+const laneOf = f =>
+  (f.confidence != null && f.confidence > LOW && f.confidence < HIGH) || !f.label
+    ? "r" : f.label === "TP" ? "c" : "d";
+
+/* ---------- rendering ---------- */
+
+function drawLanes() {
+  const n = { c: 0, d: 0, r: 0 };
+  FINDINGS.forEach(f => n[laneOf(f)]++);
+  $("#lanes").innerHTML = Object.entries(LANES).map(([k, label]) =>
+    `<button class="lane ${k}" data-lane="${k}" aria-pressed="${FILTER === k}">
+       <span class="n">${n[k]}</span><span>${label}</span></button>`).join("");
+}
+
+function drawList() {
+  const items = FINDINGS
+    .map((f, i) => ({ f, i }))
+    .filter(({ f }) => !FILTER || laneOf(f) === FILTER);
+  $("#list").className = "list " + (FILTER || "");
+  $("#list").innerHTML = items.map(({ f, i }) => `<li><button data-i="${i}"
+      aria-current="${i === SEL}">
+      <span class="id">${esc(f.check_id)}${f.occurrence ? " #" + f.occurrence : ""}</span>
+      <span class="meta">${esc(f.tool)} · ${f.start_line}-${f.end_line}</span>
+    </button></li>`).join("") || "<li><button>nothing in this lane</button></li>";
+}
+
+function drawCode() {
+  const sel = FINDINGS[SEL];
+  $("#code").innerHTML = SRC.map((line, n) => {
+    const ln = n + 1;
+    const here = FINDINGS
+      .map((f, i) => ({ f, i }))
+      .filter(({ f }) => ln >= f.start_line && ln <= f.end_line);
+    const on = sel && ln >= sel.start_line && ln <= sel.end_line;
+    const marks = here.map(({ f, i }) =>
+      `<button class="mark ${laneOf(f)}" data-i="${i}" aria-current="${i === SEL}"
+         title="${esc(f.check_id)}"></button>`).join("");
+    return `<div class="row${on ? " on" : ""}"><span class="ln">${ln}</span>
+      <span class="gut">${marks}</span><span class="txt">${esc(line) || " "}</span></div>`;
+  }).join("");
+}
+
+function drawDetail() {
+  const f = FINDINGS[SEL];
+  const d = $("#detail");
+  if (!f) {
+    d.className = "detail";
+    d.innerHTML = `<p class="meta">Select a finding from the list or the gutter.</p>`;
+    return;
+  }
+  const k = laneOf(f);
+  d.className = "detail " + k;
+  const conf = f.confidence == null ? "" :
+    ` · model confidence ${(f.confidence * 100).toFixed(0)}% that this is real`;
+  d.innerHTML = `
+    <h2>${esc(f.check_id)}${f.occurrence ? " #" + f.occurrence : ""}</h2>
+    <div class="meta">${esc(f.tool)} · lines ${f.start_line}-${f.end_line}${conf}</div>
+    <p><span class="verdict ${k}">${LANES[k]}.</span>
+       ${esc(f.fix || f.reason || f.title || "")}</p>
+    ${k === "r" ? `<p class="caution">The model was not decisive here. Findings in
+       this band were right about half the time in testing, so read the file
+       rather than the verdict.</p>` : ""}
+    ${k === "d" ? `<p class="caution">Dismissals are the model's weaker side: about
+       one in nine confident dismissals was a real finding, and the stated reason
+       is sometimes not supported by the file.</p>` : ""}`;
+}
+
+function select(i) { SEL = i; drawList(); drawCode(); drawDetail(); }
+
+/* ---------- job ---------- */
+
+async function run(file) {
+  SRC = (await file.text()).replace(/\n$/, "").split("\n");
+  $("#review").classList.add("hide");
+  $("#status").textContent = "scanning " + file.name;
+
+  const fd = new FormData(); fd.append("file", file);
+  const res = await fetch("/api/scan", { method: "POST", body: fd });
+  if (!res.ok) { $("#status").textContent = await res.text(); return; }
+  const { job_id } = await res.json();
+
+  for (;;) {
+    const j = await (await fetch("/api/jobs/" + job_id)).json();
+    if (j.stage === "error") { $("#status").textContent = j.error; return; }
+    if (j.stage === "done") {
+      FINDINGS = j.result.items; SEL = -1; FILTER = null;
+      $("#fname").textContent = j.filename;
+      const c = j.result.context;
+      $("#ctx").textContent = c
+        ? `${c.iac_type} · ${c.cloud_provider} · ${c.environment}` : "";
+      $("#status").textContent =
+        `${FINDINGS.length} findings in ${j.seconds}s` +
+        (j.run_id ? ` · filed as ${j.run_id.slice(0, 8)}` : "");
+      $("#review").classList.remove("hide");
+      drawLanes(); drawList(); drawCode(); drawDetail(); history();
+      return;
+    }
+    $("#status").textContent = j.findings
+      ? `${j.stage}, ${j.findings} findings` : j.stage + "…";
+    await new Promise(r => setTimeout(r, 1500));
+  }
+}
+
+/* ---------- service strip ---------- */
+
+async function service() {
+  let s;
+  try { s = await (await fetch("/api/service")).json(); } catch (e) { return; }
+  if (s.error || s.temp == null) { $("#svc").classList.add("hide"); return; }
+  $("#svc").classList.remove("hide");
+  const limit = s.pause_temp || 0, bar = $("#bar");
+  bar.querySelector("i").style.width = Math.min(100, s.temp) + "%";
+  bar.classList.toggle("hot", limit && s.temp >= limit);
+  bar.classList.toggle("warm", limit && s.temp >= limit - 8 && s.temp < limit);
+  $("#mark").style.left = limit ? limit + "%" : "-10px";
+  $("#temp").textContent = s.temp + "°C";
+  const bits = [];
+  if (s.util != null) bits.push(s.util + "%");
+  if (s.mem_used_gb != null) bits.push(s.mem_used_gb + " GB");
+  if (s.paused_now) bits.push("cooling");
+  $("#rest").textContent = bits.length ? " · " + bits.join(" · ") : "";
+}
+
+async function history() {
+  try {
+    const { runs = [] } = await (await fetch("/api/runs?limit=6")).json();
+    $("#hist").innerHTML = runs.length ? runs.map(r => `<div>
+      <span>${esc(r.created_at.replace("T", " ").slice(0, 16))}</span>
+      <span>${esc(r.source)}</span>
+      <span>${r.findings} findings, ${r.tp} confirmed</span></div>`).join("")
+      : "<div>no runs yet</div>";
+  } catch (e) { $("#hist").innerHTML = "<div>history unavailable</div>"; }
+}
+
+/* ---------- wiring ---------- */
+
+$("#lanes").addEventListener("click", e => {
+  const b = e.target.closest(".lane"); if (!b) return;
+  FILTER = FILTER === b.dataset.lane ? null : b.dataset.lane;
+  drawLanes(); drawList();
+});
+$("#list").addEventListener("click", e => {
+  const b = e.target.closest("button[data-i]"); if (b) select(+b.dataset.i);
+});
+$("#code").addEventListener("click", e => {
+  const b = e.target.closest(".mark"); if (b) select(+b.dataset.i);
+});
+
+const drop = $("#drop");
+["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.add("over");
+}));
+["dragleave", "drop"].forEach(t =>
+  drop.addEventListener(t, () => drop.classList.remove("over")));
+drop.addEventListener("drop", e => {
+  e.preventDefault();
+  if (e.dataTransfer.files[0]) run(e.dataTransfer.files[0]);
+});
+$("#file").addEventListener("change", e =>
+  e.target.files[0] && run(e.target.files[0]));
+
+const KEY = "cloudsec-theme", LABEL = { dark: "Dark", light: "Light" };
+function theme(t) {
+  const el = document.documentElement;
+  if (t) el.setAttribute("data-theme", t); else el.removeAttribute("data-theme");
+  $("#theme").textContent = LABEL[t] || "Auto";
+}
+try { theme(localStorage.getItem(KEY)); } catch (e) { theme(null); }
+$("#theme").addEventListener("click", () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const next = cur === "dark" ? "light" : cur === "light" ? null : "dark";
+  theme(next);
+  try { next ? localStorage.setItem(KEY, next) : localStorage.removeItem(KEY); }
+  catch (e) {}
+});
+
+drawDetail(); service(); history(); setInterval(service, 4000);
+</script>
+</body>
+</html>

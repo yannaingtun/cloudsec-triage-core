@@ -31,6 +31,29 @@ from cloudsec.pipeline import FileResult, pair
 from cloudsec.scan import scan_file
 
 
+USER_AGENT = "cloudsec-client/1.0"
+
+
+def _headers() -> dict[str, str]:
+    """Cloudflare Access service-token headers, when the service is behind one.
+
+    An identity policy redirects to a login page, which an HTTP client cannot
+    complete, so a program needs a service token. Read from the environment so
+    a secret never lands in a config file or the repo.
+
+    The User-Agent is not cosmetic: Cloudflare returns 403 to urllib's default
+    "Python-urllib/3.12" before Access is even consulted, so a request with
+    perfectly good credentials is rejected without explanation.
+    """
+    h = {"User-Agent": USER_AGENT}
+    i = os.environ.get("CLOUDSEC_CF_CLIENT_ID")
+    k = os.environ.get("CLOUDSEC_CF_CLIENT_SECRET")
+    if i and k:
+        h["CF-Access-Client-Id"] = i
+        h["CF-Access-Client-Secret"] = k
+    return h
+
+
 class TriageError(RuntimeError):
     """The service refused the request or could not be reached."""
 
@@ -45,7 +68,9 @@ class TriageClient:
 
     def health(self) -> dict:
         try:
-            with urllib.request.urlopen(self._url("/health"), timeout=10) as r:
+            req = urllib.request.Request(self._url("/health"),
+                                         headers=_headers())
+            with urllib.request.urlopen(req, timeout=10) as r:
                 return json.loads(r.read())
         except Exception as e:
             raise TriageError(f"{self.base_url} not answering: {e}") from e
@@ -60,7 +85,8 @@ class TriageClient:
         }
         req = urllib.request.Request(
             self._url("/triage"), data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"})
+            headers={"Content-Type": "application/json",
+                     **_headers()})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 body = json.loads(r.read())

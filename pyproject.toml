@@ -10,7 +10,7 @@ dev = ["pytest==8.3.5"]
 web = ["fastapi==0.118.0", "uvicorn==0.37.0", "python-multipart==0.0.20"]
 # torch is deliberately absent: it is platform-specific, and on ARM64
 # it must come from NVIDIA's build rather than PyPI. Install it first.
-serve = ["fastapi==0.118.0", "uvicorn==0.37.0", "transformers>=5,<6",
+serve = ["fastapi==0.118.0", "uvicorn==0.37.0", "transformers==5.20.2",
          "accelerate", "peft", "packaging"]
 
 # The collector stores runs and never loads a model, so it shares the web

@@ -46,6 +46,15 @@ uv venv --quiet --python 3.12 "$DEST/checkov-venv"
 uv pip install --quiet --python "$DEST/checkov-venv/bin/python" "checkov==$CHECKOV"
 ln -sf "../checkov-venv/bin/checkov" "$DEST/bin/checkov"
 
+# Trivy: a prebuilt binary if TRIVY_BIN is set (e.g. built from the v0.58.2
+# source tag, since that release was withdrawn), otherwise the release tarball.
+if [ -n "${TRIVY_BIN:-}" ]; then
+  install -m 755 "$TRIVY_BIN" "$DEST/bin/trivy"
+  "$DEST/bin/checkov" --version
+  "$DEST/bin/trivy" --version | head -1
+  exit 0
+fi
+
 # Trivy from the release tarball, checksum verified
 TMP="$(mktemp -d)"
 # Trivy publishes one tarball per architecture; the names differ from uname's.

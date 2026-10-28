@@ -1,0 +1,53 @@
+# Client side: dashboard and run history. The model is reached over the public
+# URL, so nothing here needs a GPU and nothing here needs host networking.
+#
+#   cd ~/Documents/cloudsec-core
+#   docker compose -f docker/compose.yml --env-file .env up -d
+#
+# .env holds CLOUDSEC_CF_CLIENT_ID and CLOUDSEC_CF_CLIENT_SECRET and is
+# gitignored: the secret belongs on the machine, not in the repo.
+
+services:
+  collector:
+    image: cloudsec-client:dev
+    entrypoint: ["python", "-m", "cloudsec.collector.app"]
+    command: ["--db", "/data/runs.db", "--host", "0.0.0.0"]
+    volumes:
+      - ${CLOUDSEC_DATA:-~/Documents/cloudsec-data}:/data
+      # Same reason as the dashboard: the package is editable, so without this
+      # the container runs the code baked into the image.
+      - ../cloudsec:/opt/cloudsec/cloudsec:ro
+    ports:
+      - "127.0.0.1:8110:8110"
+    restart: unless-stopped
+
+  dashboard:
+    image: cloudsec-client:dev
+    entrypoint: ["python", "-m", "cloudsec.web.app"]
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--profile"
+      - "${CLOUDSEC_PROFILE:-latest}"
+      - "--triage-url"
+      - "${CLOUDSEC_TRIAGE_URL:-https://triage.yannai.dev}"
+      - "--collector"
+      - "http://collector:8110"
+    environment:
+      CLOUDSEC_CF_CLIENT_ID: ${CLOUDSEC_CF_CLIENT_ID}
+      CLOUDSEC_CF_CLIENT_SECRET: ${CLOUDSEC_CF_CLIENT_SECRET}
+    volumes:
+      # The package is installed editable, so mounting the source makes HTML
+      # and CSS edits live. Without this the container serves the copy baked
+      # into the image and every edit looks like it did nothing.
+      - ../cloudsec:/opt/cloudsec/cloudsec:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    extra_hosts:
+      # The model runs on this host. Reaching it over the tunnel would put a
+      # two-minute generation inside one HTTP request, and Cloudflare's free
+      # tier cuts those at 100 seconds.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - collector
+    restart: unless-stopped

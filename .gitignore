@@ -20,5 +20,9 @@ go*.linux-*.tar.gz
 
 # toolchain tarballs fetched for source builds
 go*.linux-*.tar.gz
-web.log
-.env.client
+
+# machine-local secrets
+.env
+
+# local run logs
+*.log

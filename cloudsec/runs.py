@@ -99,6 +99,7 @@ def build_run(results: list[FileResult], *, profile: str | None = None,
                          "environment": ctx.environment,
                          "purpose": ctx.purpose} if ctx else None),
             "raw_output": r.raw_output,
+            "content": r.file.content,
             "findings": [{
                 "tool": t.finding.tool,
                 "check_id": t.finding.check_id,

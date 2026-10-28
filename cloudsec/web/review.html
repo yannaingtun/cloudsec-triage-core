@@ -143,9 +143,20 @@
 
   .hist { margin-top: 36px; font-size: 13px; }
   .hist h2 { font-size: 13px; font-weight: 700; margin: 0 0 8px; }
-  .hist div { display: flex; gap: 14px; padding: 5px 0;
+  #hist .run { cursor: pointer; display: flex; gap: 14px; padding: 5px 0;
               border-bottom: 1px solid var(--rule); color: var(--muted);
               font-variant-numeric: tabular-nums; }
+  #hist .run:hover { color: var(--ink); }
+  .nosrc { padding: 26px 16px; color: var(--muted); font-size: 13px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px;
+             padding-top: 14px; border-top: 1px solid var(--rule); }
+  .actions input { flex: 1 1 200px; font: inherit; font-size: 13px;
+                   padding: 4px 9px; border: 1px solid var(--rule);
+                   border-radius: 5px; background: var(--paper); color: var(--ink); }
+  .reviewed { margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .list .done { color: var(--muted); font-size: 11px; }
+  .progress { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
+  .progress b { color: var(--ink); font-size: 15px; }
   .hide { display: none; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
@@ -197,9 +208,28 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g,
 // band we measured at 54% accurate, whichever way it leaned. That band is 10%
 // of findings and about 38% of the errors, so it is the one worth a human.
 const LOW = 0.1, HIGH = 0.9;
-const LANES = { c: "confirmed", d: "dismissed", r: "needs review" };
+
+// Five bands over |p-0.5|*2, which is confidence in the verdict rather than
+// P(TP): a dismissal at 0.01 is a confident dismissal, not low confidence.
+// The third number is the accuracy that band actually achieved over the 606
+// scored findings, so the word carries a measurement rather than a vibe.
+const BANDS = [
+  ["very high", 0.98, 0.935, 478],
+  ["high",      0.80, 0.812,  69],
+  ["medium",    0.40, 0.649,  37],
+  ["low",       0.20, 0.333,   9],
+  ["very low",  0.00, 0.385,  13],
+];
+const bandOf = p => BANDS.find(b => Math.abs(p - 0.5) * 2 >= b[1]);
+// TP and FP are the domain's own words and the model's own output; "likely"
+// is what keeps them a suggestion rather than a verdict. Only the progress
+// counter says anything is finished.
+const LANES = { r: "uncertain", d: "likely FP", c: "likely TP" };
 
 let FINDINGS = [], SRC = [], SEL = -1, FILTER = null;
+
+const human = f => f.review && f.review.decision === "override"
+  ? f.review.label : f.review ? f.label : null;
 
 const laneOf = f =>
   (f.confidence != null && f.confidence > LOW && f.confidence < HIGH) || !f.label
@@ -210,7 +240,10 @@ const laneOf = f =>
 function drawLanes() {
   const n = { c: 0, d: 0, r: 0 };
   FINDINGS.forEach(f => n[laneOf(f)]++);
-  $("#lanes").innerHTML = Object.entries(LANES).map(([k, label]) =>
+  const done = FINDINGS.filter(f => f.review).length;
+  $("#lanes").innerHTML =
+    `<p class="progress">reviewed <b>${done}</b> of ${FINDINGS.length}</p>` +
+    Object.entries(LANES).map(([k, label]) =>
     `<button class="lane ${k}" data-lane="${k}" aria-pressed="${FILTER === k}">
        <span class="n">${n[k]}</span><span>${label}</span></button>`).join("");
 }
@@ -223,11 +256,18 @@ function drawList() {
   $("#list").innerHTML = items.map(({ f, i }) => `<li><button data-i="${i}"
       aria-current="${i === SEL}">
       <span class="id">${esc(f.check_id)}${f.occurrence ? " #" + f.occurrence : ""}</span>
-      <span class="meta">${esc(f.tool)} · ${f.start_line}-${f.end_line}</span>
+      <span class="meta">${esc(f.tool)} · ${f.start_line}-${f.end_line}${
+        f.review ? ' · <span class="done">reviewed</span>' : ""}</span>
     </button></li>`).join("") || "<li><button>nothing in this lane</button></li>";
 }
 
 function drawCode() {
+  if (!SRC.length) {
+    $("#code").innerHTML = `<p class="nosrc">The file itself is not stored, only
+      its hash, so a past run shows its findings without the source. Re-upload
+      the file to see them in place.</p>`;
+    return;
+  }
   const sel = FINDINGS[SEL];
   $("#code").innerHTML = SRC.map((line, n) => {
     const ln = n + 1;
@@ -253,8 +293,25 @@ function drawDetail() {
   }
   const k = laneOf(f);
   d.className = "detail " + k;
-  const conf = f.confidence == null ? "" :
-    ` · model confidence ${(f.confidence * 100).toFixed(0)}% that this is real`;
+  let conf = "";
+  if (f.confidence != null) {
+    const [word, , acc, n] = bandOf(f.confidence);
+    conf = ` · ${word} confidence <span title="${word} verdicts were ` +
+           `${(acc * 100).toFixed(0)}% accurate across ${n} test findings">` +
+           `(${(acc * 100).toFixed(0)}% accurate in testing)</span>`;
+  }
+  const rev = f.review;
+  const controls = f.finding_id == null ? "" : `
+    <div class="actions">
+      <button class="btn" data-act="agree">Agree</button>
+      <button class="btn" data-act="TP">Mark true positive</button>
+      <button class="btn" data-act="FP">Mark false positive</button>
+      <input id="note" placeholder="note (optional)" value="${esc(rev && rev.note || "")}">
+    </div>
+    ${rev ? `<p class="reviewed">${rev.decision === "agree"
+        ? "Confirmed" : "Changed to " + rev.label} by
+        ${esc(rev.reviewer || "an unattributed reviewer")} ·
+        ${esc(rev.created_at.replace("T", " ").slice(0, 16))}</p>` : ""}`;
   d.innerHTML = `
     <h2>${esc(f.check_id)}${f.occurrence ? " #" + f.occurrence : ""}</h2>
     <div class="meta">${esc(f.tool)} · lines ${f.start_line}-${f.end_line}${conf}</div>
@@ -263,9 +320,42 @@ function drawDetail() {
     ${k === "r" ? `<p class="caution">The model was not decisive here. Findings in
        this band were right about half the time in testing, so read the file
        rather than the verdict.</p>` : ""}
-    ${k === "d" ? `<p class="caution">Dismissals are the model's weaker side: about
-       one in nine confident dismissals was a real finding, and the stated reason
-       is sometimes not supported by the file.</p>` : ""}`;
+    ${k === "d" && !f.review ? `<p class="caution">Not dismissed, only ranked
+       low. About one in nine of the model's confident dismissals was a real
+       finding, and the stated reason is sometimes not supported by the file,
+       so this still needs a person.</p>` : ""}
+    ${controls}`;
+}
+
+async function openRun(id) {
+  const run = await (await fetch("/api/runs/" + id)).json();
+  const f = (run.files || [])[0];
+  if (!f) return;
+  FINDINGS = f.findings || [];
+  SRC = f.content ? f.content.replace(/\n$/, "").split("\n") : [];
+  SEL = -1; FILTER = null;
+  $("#fname").textContent = f.path || "(stored run)";
+  $("#ctx").textContent = [f.iac_type, f.cloud_provider, f.environment]
+    .filter(Boolean).join(" · ");
+  $("#status").textContent =
+    `${run.created_at.replace("T", " ").slice(0, 16)} · ${run.source} · ` +
+    `${run.profile} · checkov ${run.checkov_version} · trivy ${run.trivy_version}`;
+  $("#review").classList.remove("hide");
+  drawLanes(); drawList(); drawCode(); drawDetail();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function act(decision, label) {
+  const f = FINDINGS[SEL];
+  if (!f || f.finding_id == null) return;
+  const note = ($("#note") || {}).value || null;
+  const res = await fetch("/api/findings/" + f.finding_id + "/review", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision, label, note }),
+  });
+  if (!res.ok) { $("#status").textContent = "review failed: " + await res.text(); return; }
+  f.review = await res.json();
+  drawList(); drawDetail();
 }
 
 function select(i) { SEL = i; drawList(); drawCode(); drawDetail(); }
@@ -287,6 +377,17 @@ async function run(file) {
     if (j.stage === "error") { $("#status").textContent = j.error; return; }
     if (j.stage === "done") {
       FINDINGS = j.result.items; SEL = -1; FILTER = null;
+      // Findings get their ids when the run is stored, and a review attaches
+      // to an id, so re-read the filed run. The source stays client-side.
+      if (j.run_id) {
+        try {
+          const run = await (await fetch("/api/runs/" + j.run_id)).json();
+          const f = (run.files || [])[0];
+          if (f && f.findings && f.findings.length === FINDINGS.length) {
+            FINDINGS = f.findings;
+          }
+        } catch (e) { /* unreviewable this session, but the result still shows */ }
+      }
       $("#fname").textContent = j.filename;
       const c = j.result.context;
       $("#ctx").textContent = c
@@ -327,7 +428,7 @@ async function service() {
 async function history() {
   try {
     const { runs = [] } = await (await fetch("/api/runs?limit=6")).json();
-    $("#hist").innerHTML = runs.length ? runs.map(r => `<div>
+    $("#hist").innerHTML = runs.length ? runs.map(r => `<div class="run" data-id="${r.run_id}">
       <span>${esc(r.created_at.replace("T", " ").slice(0, 16))}</span>
       <span>${esc(r.source)}</span>
       <span>${r.findings} findings, ${r.tp} confirmed</span></div>`).join("")
@@ -344,6 +445,17 @@ $("#lanes").addEventListener("click", e => {
 });
 $("#list").addEventListener("click", e => {
   const b = e.target.closest("button[data-i]"); if (b) select(+b.dataset.i);
+});
+$("#detail").addEventListener("click", e => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const a = b.dataset.act;
+  act(a === "agree" ? "agree" : "override", a === "agree" ? null : a);
+});
+
+$("#hist").addEventListener("click", e => {
+  const row = e.target.closest("[data-id]");
+  if (row) openRun(row.dataset.id);
 });
 $("#code").addEventListener("click", e => {
   const b = e.target.closest(".mark"); if (b) select(+b.dataset.i);

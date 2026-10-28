@@ -53,6 +53,7 @@ class FileIn(BaseModel):
     content_sha256: str | None = None
     context: ContextIn | None = None
     raw_output: str | None = None
+    content: str | None = None   # the file as scanned
     findings: list[FindingIn] = Field(default_factory=list)
 
 
@@ -73,6 +74,13 @@ class RunIn(BaseModel):
     seconds: float | None = None
     client: str | None = None
     files: list[FileIn] = Field(default_factory=list)
+
+
+class ReviewIn(BaseModel):
+    decision: str                      # agree | override
+    label: str | None = None           # required when overriding
+    reviewer: str | None = None
+    note: str | None = None
 
 
 @asynccontextmanager
@@ -111,6 +119,17 @@ def post_run(r: RunIn):
 def get_runs(limit: int = Query(50, le=500), project: str | None = None,
              external_ref: str | None = None):
     return {"runs": store.list_runs(STATE["db"], limit, project, external_ref)}
+
+
+@app.post("/findings/{finding_id}/review", status_code=201)
+def review(finding_id: int, r: ReviewIn):
+    data = r.model_dump() if hasattr(r, "model_dump") else r.dict()
+    try:
+        return store.add_review(STATE["db"], finding_id, **data)
+    except KeyError:
+        raise HTTPException(404, f"no finding {finding_id}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/runs/{run_id}")

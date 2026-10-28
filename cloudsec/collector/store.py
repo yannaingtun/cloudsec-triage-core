@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS files (
     cloud_provider TEXT,
     environment    TEXT,
     purpose        TEXT,
-    raw_output     TEXT
+    raw_output     TEXT,
+    content        TEXT   -- the file as scanned; see the retention note
 );
 CREATE INDEX IF NOT EXISTS files_run ON files(run_id);
 CREATE INDEX IF NOT EXISTS files_sha ON files(content_sha256);
@@ -76,6 +77,51 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 CREATE INDEX IF NOT EXISTS findings_file  ON findings(file_id);
 CREATE INDEX IF NOT EXISTS findings_check ON findings(check_id);
+
+/* A human's judgement, kept apart from the model's. Overwriting the verdict
+   would destroy the only thing that makes this worth collecting: the
+   agreement rate between model and reviewer, and a stream of corrections.
+   Rows accumulate; the highest review_id for a finding is the current one. */
+CREATE TABLE IF NOT EXISTS reviews (
+    review_id  INTEGER PRIMARY KEY,
+    finding_id INTEGER NOT NULL REFERENCES findings(finding_id) ON DELETE CASCADE,
+    reviewer   TEXT,
+    decision   TEXT NOT NULL,
+    label      TEXT,
+    note       TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reviews_finding ON reviews(finding_id);
+
+/* The resolved verdict: the human's if one exists, otherwise the model's.
+   A view rather than a stored column, so the two can never drift apart and
+   it is always clear which source a verdict came from. */
+CREATE VIEW IF NOT EXISTS verdicts AS
+SELECT
+    f.*,
+    fi.run_id,
+    fi.path,
+    r.decision   AS review_decision,
+    r.label      AS review_label,
+    r.reviewer   AS reviewer,
+    r.note       AS review_note,
+    r.created_at AS reviewed_at,
+    CASE
+        WHEN r.decision = 'override' THEN r.label
+        ELSE f.label
+    END AS final_label,
+    CASE
+        WHEN r.review_id IS NULL THEN 'model'
+        WHEN r.decision = 'agree' THEN 'model, confirmed'
+        ELSE 'human'
+    END AS verdict_source
+FROM findings f
+JOIN files fi ON fi.file_id = f.file_id
+LEFT JOIN (
+    SELECT r1.* FROM reviews r1
+    JOIN (SELECT finding_id, MAX(review_id) AS mx FROM reviews GROUP BY finding_id) m
+      ON r1.review_id = m.mx
+) r ON r.finding_id = f.finding_id;
 """
 
 RUN_COLS = ("run_id", "created_at", "source", "external_ref", "project",
@@ -102,6 +148,9 @@ def connect(path: str | Path) -> sqlite3.Connection:
     # will not add them. NULL is correct for old rows: not measured, which is
     # different from measured as uncertain.
     have = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
+    have_f = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+    if "content" not in have_f:
+        conn.execute("ALTER TABLE files ADD COLUMN content TEXT")
     for col, typ in (("confidence", "REAL"), ("confidence_source", "TEXT")):
         if col not in have:
             conn.execute(f"ALTER TABLE findings ADD COLUMN {col} {typ}")
@@ -124,12 +173,12 @@ def save(conn: sqlite3.Connection, run: dict) -> str:
             ctx = f.get("context") or {}
             cur = conn.execute(
                 "INSERT INTO files (run_id, path, content_sha256, iac_type, "
-                "cloud_provider, environment, purpose, raw_output) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "cloud_provider, environment, purpose, raw_output, content) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (rid, f.get("path"), f.get("content_sha256"),
                  ctx.get("iac_type"), ctx.get("cloud_provider"),
                  ctx.get("environment"), ctx.get("purpose"),
-                 f.get("raw_output")))
+                 f.get("raw_output"), f.get("content")))
             fid = cur.lastrowid
             conn.executemany(
                 "INSERT INTO findings (file_id, idx, tool, check_id, occurrence, "
@@ -143,6 +192,39 @@ def save(conn: sqlite3.Connection, run: dict) -> str:
                   x.get("confidence_source"))
                  for i, x in enumerate(f.get("findings", []))])
     return rid
+
+
+def add_review(conn, finding_id: int, decision: str, label: str | None = None,
+               reviewer: str | None = None, note: str | None = None) -> dict:
+    """Record one judgement. Never updates in place."""
+    from datetime import datetime, timezone
+
+    if decision not in ("agree", "override"):
+        raise ValueError(f"decision must be agree or override, not {decision!r}")
+    if decision == "override" and label not in ("TP", "FP"):
+        raise ValueError("an override needs a label of TP or FP")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with conn:
+        if not conn.execute("SELECT 1 FROM findings WHERE finding_id = ?",
+                            (finding_id,)).fetchone():
+            raise KeyError(finding_id)
+        cur = conn.execute(
+            "INSERT INTO reviews (finding_id, reviewer, decision, label, note, "
+            "created_at) VALUES (?,?,?,?,?,?)",
+            (finding_id, reviewer, decision, label, note, now))
+    return {"review_id": cur.lastrowid, "finding_id": finding_id,
+            "decision": decision, "label": label, "reviewer": reviewer,
+            "note": note, "created_at": now}
+
+
+def latest_reviews(conn, run_id: str) -> dict[int, dict]:
+    """The current judgement per finding in a run, if any."""
+    sql = ("SELECT r.* FROM reviews r "
+           "JOIN (SELECT finding_id, MAX(review_id) AS mx FROM reviews "
+           "      GROUP BY finding_id) m ON r.review_id = m.mx "
+           "JOIN findings f ON f.finding_id = r.finding_id "
+           "JOIN files fi ON fi.file_id = f.file_id WHERE fi.run_id = ?")
+    return {r["finding_id"]: dict(r) for r in conn.execute(sql, (run_id,))}
 
 
 def list_runs(conn, limit=50, project=None, external_ref=None) -> list[dict]:
@@ -172,6 +254,7 @@ def get_run(conn, run_id: str) -> dict | None:
     if row is None:
         return None
     run = dict(row)
+    reviews = latest_reviews(conn, run_id)
     run["files"] = []
     for f in conn.execute("SELECT * FROM files WHERE run_id = ? ORDER BY file_id",
                           (run_id,)):
@@ -179,5 +262,14 @@ def get_run(conn, run_id: str) -> dict | None:
         d["findings"] = [dict(x) for x in conn.execute(
             "SELECT * FROM findings WHERE file_id = ? ORDER BY idx",
             (d["file_id"],))]
+        for x in d["findings"]:
+            rv = reviews.get(x["finding_id"])
+            x["review"] = rv
+            # Same rule as the verdicts view, so API and SQL agree.
+            x["final_label"] = (rv["label"] if rv and rv["decision"] == "override"
+                                else x["label"])
+            x["verdict_source"] = ("model" if not rv else
+                                   "model, confirmed" if rv["decision"] == "agree"
+                                   else "human")
         run["files"].append(d)
     return run
